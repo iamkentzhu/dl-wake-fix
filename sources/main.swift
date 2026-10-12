@@ -94,7 +94,8 @@ func restartAgent() {
     say("restart took \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
 }
 
-// 轮询 1s。唤醒路径：醒来后给第一块屏 3s，仍缺屏立刻重启。慢速路径（拔插等）：缺屏持续 10s 才动手。冷却 30s，最多连续 3 次
+// 轮询 1s。唤醒路径：醒来后给第一块屏 3s，仍缺屏立刻重启。慢速路径（拔插等）：缺屏持续 10s 才动手。
+// 冷却 10s；恢复后立刻清零冷却与计数，让"刚恢复又掉"能马上重试，单轮最多连续 3 次
 // 不用 screensDidWakeNotification：命令行进程收不到该通知（2026-10-09 实测）
 // 暂停：touch ~/Library/Scripts/dl-wake-fix/disabled
 let disabledFlag = NSHomeDirectory() + "/Library/Scripts/dl-wake-fix/disabled"
@@ -122,7 +123,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
                 restarts += 1; bad = 0
                 say("woke with externals=\(externalCount()) < \(expected), restarting (#\(restarts))")
                 restartAgent()
-                cooldownUntil = Date().addingTimeInterval(30)
+                cooldownUntil = Date().addingTimeInterval(10)
             }
         }
     }
@@ -142,7 +143,11 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     }
     if off || asleep || !dock { bad = 0; restarts = 0; return }
     if c >= expected {
-        if restarts > 0 { say("recovered externals=\(c) after \(restarts) restart(s)"); restarts = 0 }
+        if restarts > 0 {
+            say("recovered externals=\(c) after \(restarts) restart(s)")
+            restarts = 0
+            cooldownUntil = Date.distantPast  // "假恢复"（刚回来又掉）应立刻重试，总量由 restarts<3 兜住
+        }
         bad = 0; restarts = 0; return
     }
     bad += 1  // 1s 一次
@@ -151,7 +156,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     say("externals=\(c) < \(expected), restarting DisplayLinkUserAgent (#\(restarts))")
     restartAgent()
     bad = 0
-    cooldownUntil = Date().addingTimeInterval(30)
+    cooldownUntil = Date().addingTimeInterval(10)
 }
 say("started")
 RunLoop.main.run()
