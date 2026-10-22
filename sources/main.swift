@@ -75,6 +75,15 @@ func saveLayout() {
     }
 }
 
+// DisplayLink 里被用户（或"停止所有共享"）禁用的屏数。这类缺屏重启救不回来，反复重启只会添乱
+// 直接读 plist 文件而非 UserDefaults：DisplayLink 是沙盒应用，偏好在它的容器里
+let dlPrefs = NSHomeDirectory() + "/Library/Containers/com.displaylink.DisplayLinkUserAgent/Data/Library/Preferences/com.displaylink.DisplayLinkUserAgent.plist"
+func disabledByUser() -> Int {
+    guard let d = NSDictionary(contentsOfFile: dlPrefs),
+          let e = d["EnabledDisplays"] as? [String: Any] else { return 0 }
+    return e.values.filter { ($0 as? Bool) == false || ($0 as? Int) == 0 }.count
+}
+
 func agentAlive() -> Bool {
     let p = Process(); p.launchPath = "/usr/bin/pgrep"; p.arguments = ["-x", "DisplayLinkUserAgent"]
     p.standardOutput = Pipe()
@@ -97,6 +106,7 @@ func restartAgent() {
 // 轮询 1s。唤醒路径：醒来后给第一块屏 3s，仍缺屏立刻重启。慢速路径（拔插等）：缺屏持续 10s 才动手。
 // 冷却 10s；恢复后立刻清零冷却与计数，让"刚恢复又掉"能马上重试，单轮最多连续 3 次
 // 不用 screensDidWakeNotification：命令行进程收不到该通知（2026-10-09 实测）
+// DisplayLink 面板里有屏被关掉（用户关闭，或菜单栏「停止所有共享」触发）时不重启，只记日志
 // 暂停：touch ~/Library/Scripts/dl-wake-fix/disabled
 let disabledFlag = NSHomeDirectory() + "/Library/Scripts/dl-wake-fix/disabled"
 var bad = 0
@@ -111,14 +121,15 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     let off = FileManager.default.fileExists(atPath: disabledFlag)
     let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0, dock = dockPresent(), c = externalCount()
     let locked = screenLocked()
-    let state = "asleep=\(asleep) dock=\(dock) externals=\(c) locked=\(locked)" + (off ? " (disabled)" : "")
+    let userOff = disabledByUser()
+    let state = "asleep=\(asleep) dock=\(dock) externals=\(c) locked=\(locked)" + (userOff > 0 ? " userOff=\(userOff)" : "") + (off ? " (disabled)" : "")
     if state != lastState { say(state); lastState = state }
     // 熄屏是唯一的触发源：醒来后 DisplayLink 不会自己补建 D1。给第一块屏 3s 出现，
     // 若仍缺屏就立刻重启，不必等连续 N 次轮询
     if wasAsleep && !asleep {
         wasAsleep = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            if !off, dockPresent(), externalCount() < expected,
+            if !off, dockPresent(), externalCount() < expected, disabledByUser() == 0,
                Date() > cooldownUntil, restarts < 3, !FileManager.default.fileExists(atPath: disabledFlag) {
                 restarts += 1; bad = 0
                 say("woke with externals=\(externalCount()) < \(expected), restarting (#\(restarts))")
@@ -128,7 +139,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
         }
     }
     if asleep { wasAsleep = true }
-    let healthy = !asleep && dock && c >= expected
+    let healthy = !asleep && dock && c >= expected - userOff
     if !healthy { needRestore = true }
     if healthy && !locked && needRestore {
         // 熄屏时 DisplayLink 会销毁两块虚拟屏，macOS 把窗口挪走；屏幕回来且解锁后按记录还原
@@ -142,7 +153,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
         lastSave = Date(); saveLayout()
     }
     if off || asleep || !dock { bad = 0; restarts = 0; return }
-    if c >= expected {
+    if c >= expected - userOff {
         if restarts > 0 {
             say("recovered externals=\(c) after \(restarts) restart(s)")
             restarts = 0
@@ -150,6 +161,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
         }
         bad = 0; restarts = 0; return
     }
+    if userOff > 0 { bad = 0; return }  // 用户禁用的屏不是故障，交给 DisplayLink 面板处理
     bad += 1  // 1s 一次
     guard bad >= 10, Date() > cooldownUntil, restarts < 3 else { return }
     restarts += 1

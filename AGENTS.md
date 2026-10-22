@@ -17,9 +17,14 @@
 - 暂停开关：`touch ~/Library/Scripts/dl-wake-fix/disabled`。
 - `dl-winlayout` 的 `save` / `restore` / `check` 可以手动调用做验证，不会改授权。
 
+## 排障先看这两条
+
+- 两块屏同时黑：先查 ControlCenter 日志里有没有 `User clicked module header button to stop all shared streams`，再看 DisplayLink 偏好 `EnabledDisplays` 是否被置 0。这是用户点了「停止所有共享」，不是驱动 bug。
+- 某块屏以 `FlipGo-D (25616#EH0900000)` 身份、1280×1600 反复出现：显示器主控卡在过渡 EDID，只能拔显示器电源复位，重启软件无效。
+
 ## 已知限制（不要当成 bug 去修）
 
 - 匹配窗口靠「App + 窗口标题」，标题变化的窗口可能对不上，保持原位不动属预期。
 - 最小化、全屏、其他桌面空间的窗口不处理。
 - 熄屏前最后 15 秒内挪动的窗口会被还原到挪动前的位置。
-- 用户故意只接一块 FlipGo 屏时，慢速路径会误判并重启最多 3 次；用暂停开关规避。
+- 用户关掉屏幕要在 DisplayLink Manager 里关，守护进程会读 `EnabledDisplays` 并跳过；只是物理断开某块面板则仍会被当作缺屏。

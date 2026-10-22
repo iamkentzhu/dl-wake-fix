@@ -91,6 +91,16 @@ Restarting the agent is required — merely activating the already-running Displ
 | `docs/parameters.md` | every timing value with its measured justification / 参数取值依据 |
 | `AGENTS.md` | constraints for AI agents working on this repo / agent 工作约束 |
 
+## Pitfall: "Stop all shared streams" / 陷阱：「停止所有共享」
+
+DisplayLink captures the screen through ScreenCaptureKit, so the purple screen-recording indicator stays in the macOS menu bar. Its panel has a header button, **Stop all shared streams**, which also stops DisplayLink. Both FlipGo panels then go dark and are persisted as disabled. Re-enable them in DisplayLink Manager → Displays.
+
+DisplayLink 通过 ScreenCaptureKit 采集画面，所以 macOS 菜单栏会一直显示紫色的屏幕录制指示图标。该面板顶部有个**「停止所有共享」**按钮，点了会连 DisplayLink 一起停掉，两块 FlipGo 随即黑屏，并以"已禁用"状态写入配置。恢复方法：在 DisplayLink Manager → Displays 里把开关重新打开。
+
+If a panel later keeps showing up as **"FlipGo-D"** at 1280×1600 instead of FlipGo-D1/D2, the monitor's scaler is stuck on its transitional EDID. Restarting software and replugging the USB-C cable do not help; **unplug the monitor's power** to reset it.
+
+如果之后某块屏一直以 **"FlipGo-D"**、1280×1600 的身份出现（而不是 FlipGo-D1/D2），说明显示器主控卡在过渡 EDID 上。重启软件、插拔 USB-C 线都没用，**拔一下显示器电源**让主控复位即可。
+
 ## Install / 安装
 
 ```sh
