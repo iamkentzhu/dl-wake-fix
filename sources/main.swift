@@ -91,6 +91,23 @@ func agentAlive() -> Bool {
     return p.terminationStatus == 0
 }
 
+// 布局摘要："bundle@屏幕" 列表，屏幕按窗口顶边中点所在的显示器判定
+func layoutSummary(_ data: Data?) -> String {
+    guard let d = data, let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { return "unreadable" }
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16); var n: UInt32 = 0
+    CGGetOnlineDisplayList(16, &ids, &n)
+    let items: [String] = arr.map { w in
+        let b = (w["bundle"] as? String ?? "?").split(separator: ".").last.map(String.init) ?? "?"
+        let x = w["x"] as? Double ?? 0, y = w["y"] as? Double ?? 0, wd = w["w"] as? Double ?? 0
+        let pt = CGPoint(x: x + wd / 2, y: y + 10)
+        // 熄屏时 active 列表为空，所以用 online 列表（屏幕熄了仍在）判定所在屏
+        let scr = ids.prefix(Int(n)).first { CGDisplayBounds($0).contains(pt) }
+        let tag = scr.map { CGDisplayIsBuiltin($0) != 0 ? "builtin" : "ext\(Int(CGDisplayBounds($0).minX))" } ?? "offscreen"
+        return "\(b)@\(tag)"
+    }
+    return "\(arr.count) windows: " + items.joined(separator: " ")
+}
+
 func restartAgent() {
     let t0 = Date()
     let k = Process(); k.launchPath = "/usr/bin/killall"; k.arguments = ["DisplayLinkUserAgent"]
@@ -107,6 +124,7 @@ func restartAgent() {
 // 冷却 10s；恢复后立刻清零冷却与计数，让"刚恢复又掉"能马上重试，单轮最多连续 3 次
 // 不用 screensDidWakeNotification：命令行进程收不到该通知（2026-10-09 实测）
 // DisplayLink 面板里有屏被关掉（用户关闭，或菜单栏「停止所有共享」触发）时不重启，只记日志
+// 窗口：出异常时冻结布局，恢复且解锁后在第 2/5/10/20/30 秒还原，35 秒后才恢复记录
 // 暂停：touch ~/Library/Scripts/dl-wake-fix/disabled
 let disabledFlag = NSHomeDirectory() + "/Library/Scripts/dl-wake-fix/disabled"
 var bad = 0
@@ -116,6 +134,8 @@ var lastState = ""
 var wasAsleep = false
 var needRestore = false  // 外接屏出过异常（熄屏/缺屏/坞离线）后置位，解锁且两屏齐全时还原
 var saveAfter = Date()   // 还原后一段时间不记录，避免把错乱布局存下来
+var frozen: Data? = nil  // 出异常时冻结的布局；还原期间每次都先写回 layout.json，防止被错误位置覆盖
+var logNextSave = false  // 还原窗口结束后的第一次记录写入日志，作为"还原后"布局
 var lastSave = Date.distantPast
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     let off = FileManager.default.fileExists(atPath: disabledFlag)
@@ -140,17 +160,34 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     }
     if asleep { wasAsleep = true }
     let healthy = !asleep && dock && c >= expected - userOff
-    if !healthy { needRestore = true }
+    if !healthy && !needRestore {
+        needRestore = true
+        // 只在记录已恢复正常时冻结；还原窗口内再次异常则沿用上一份冻结，不拿半成品覆盖
+        if Date() > saveAfter || frozen == nil {
+            frozen = FileManager.default.contents(atPath: layoutPath)
+            say("froze layout: \(layoutSummary(frozen))")
+        }
+    }
     if healthy && !locked && needRestore {
-        // 熄屏时 DisplayLink 会销毁两块虚拟屏，macOS 把窗口挪走；屏幕回来且解锁后按记录还原
+        // 熄屏时 DisplayLink 会销毁两块虚拟屏，macOS 把窗口挪走；屏幕回来且解锁后按冻结的布局还原。
+        // Electron 应用（Codex、Paseo）的窗口可能晚几秒才回到窗口列表，所以多轮还原（2026-10-26 实测漏挪）
         needRestore = false
         say("healthy & unlocked, restoring window layout")
-        saveAfter = Date().addingTimeInterval(20)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { winlayout("restore") }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { winlayout("restore") }
+        saveAfter = Date().addingTimeInterval(35)
+        logNextSave = true
+        for delay in [2.0, 5, 10, 20, 30] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if let f = frozen { try? f.write(to: URL(fileURLWithPath: layoutPath)) }
+                winlayout("restore")
+            }
+        }
     }
     if healthy && !locked && !needRestore && Date() > saveAfter && Date().timeIntervalSince(lastSave) >= 15 {
         lastSave = Date(); saveLayout()
+        if logNextSave {
+            logNextSave = false
+            say("layout after restore: \(layoutSummary(FileManager.default.contents(atPath: layoutPath)))")
+        }
     }
     if off || asleep || !dock { bad = 0; restarts = 0; return }
     if c >= expected - userOff {

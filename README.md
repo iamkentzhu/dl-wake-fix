@@ -71,8 +71,8 @@ A launchd daemon polling once per second, restarting the DisplayLink agent when 
    **唤醒路径（快）**：`CGDisplayIsAsleep` 由 true 变 false 后等 3 秒，若第二块屏仍未出现，执行 `killall DisplayLinkUserAgent` + `open -g -a "DisplayLink Manager"` 强制全量重建。实测**亮屏到两屏齐 6 秒**。
 2. **Slow path.** Scenarios without a sleep transition (replugging) use a 10 s window, so it doesn't fight panels appearing one after another.
    **慢速路径**：不经过熄屏的场景（拔插数据线）用 10 秒窗口兜底，避免和陆续出现的屏幕互相打架。
-3. **Window layout restore.** Because DisplayLink destroys both virtual displays, macOS evicts every window that was on them. A helper records window positions while healthy and puts them back once both displays are up and the session is unlocked.
-   **窗口还原**：因为 DisplayLink 销毁了两块虚拟屏，macOS 会把上面的窗口全部挪走。独立帮手在系统正常时记录窗口位置，两块屏就位且解锁后摆回原位。
+3. **Window layout restore.** Because DisplayLink destroys both virtual displays, macOS evicts every window that was on them. A helper records window positions while healthy and puts them back once both displays are up and the session is unlocked. The layout is frozen the moment a display goes missing, and restore runs at 2, 5, 10, 20 and 30 s after recovery: Electron apps (Codex, Paseo) can take several seconds to re-register their windows, and a single early pass would miss them — after which the wrong position would be recorded as the new baseline.
+   **窗口还原**：因为 DisplayLink 销毁了两块虚拟屏，macOS 会把上面的窗口全部挪走。独立帮手在系统正常时记录窗口位置，两块屏就位且解锁后摆回原位。布局在缺屏那一刻就冻结，恢复后在第 2、5、10、20、30 秒各还原一次：Electron 应用（Codex、Paseo）的窗口可能要好几秒才重新出现在窗口列表里，只还原一次会漏掉它们，之后错误位置还会被记成新的基准。
 
 Restarting the agent is required — merely activating the already-running DisplayLink Manager does not recreate the missing display (tested: 16 s, no recovery).
 
