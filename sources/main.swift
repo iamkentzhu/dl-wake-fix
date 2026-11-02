@@ -108,7 +108,14 @@ func layoutSummary(_ data: Data?) -> String {
     return "\(arr.count) windows: " + items.joined(separator: " ")
 }
 
+// 重启锁：Process.waitUntilExit 会转主 runloop，1s 定时器在等待期间重入；
+// 2026-11-02 17:59 第一次重启耗时 12s，期间又触发第二次，把刚拉起的进程杀掉
+var restarting = false
+
 func restartAgent() {
+    guard !restarting else { return }
+    restarting = true
+    defer { restarting = false }
     let t0 = Date()
     let k = Process(); k.launchPath = "/usr/bin/killall"; k.arguments = ["DisplayLinkUserAgent"]
     try? k.run(); k.waitUntilExit()
@@ -132,12 +139,14 @@ var cooldownUntil = Date.distantPast
 var restarts = 0
 var lastState = ""
 var wasAsleep = false
+var dockAtSleep = false  // 熄屏那一刻扩展坞是否在线；不在线说明醒来时是新插的坞，DisplayLink 需要十几秒初始化
 var needRestore = false  // 外接屏出过异常（熄屏/缺屏/坞离线）后置位，解锁且两屏齐全时还原
 var saveAfter = Date()   // 还原后一段时间不记录，避免把错乱布局存下来
 var frozen: Data? = nil  // 出异常时冻结的布局；还原期间每次都先写回 layout.json，防止被错误位置覆盖
 var logNextSave = false  // 还原窗口结束后的第一次记录写入日志，作为"还原后"布局
 var lastSave = Date.distantPast
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+    if restarting { return }
     let off = FileManager.default.fileExists(atPath: disabledFlag)
     let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0, dock = dockPresent(), c = externalCount()
     let locked = screenLocked()
@@ -149,7 +158,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     if wasAsleep && !asleep {
         wasAsleep = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            if !off, dockPresent(), externalCount() < expected, disabledByUser() == 0,
+            if !off, dockAtSleep, !restarting, dockPresent(), externalCount() < expected, disabledByUser() == 0,
                Date() > cooldownUntil, restarts < 3, !FileManager.default.fileExists(atPath: disabledFlag) {
                 restarts += 1; bad = 0
                 say("woke with externals=\(externalCount()) < \(expected), restarting (#\(restarts))")
@@ -158,6 +167,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             }
         }
     }
+    if asleep && !wasAsleep { dockAtSleep = dock }
     if asleep { wasAsleep = true }
     let healthy = !asleep && dock && c >= expected - userOff
     if !healthy && !needRestore {
