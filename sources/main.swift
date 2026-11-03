@@ -84,11 +84,13 @@ func disabledByUser() -> Int {
     return e.values.filter { ($0 as? Bool) == false || ($0 as? Int) == 0 }.count
 }
 
-func agentAlive() -> Bool {
+// DisplayLinkUserAgent 的 PID 列表（一次 pgrep）
+func agentPIDs() -> [pid_t] {
     let p = Process(); p.launchPath = "/usr/bin/pgrep"; p.arguments = ["-x", "DisplayLinkUserAgent"]
-    p.standardOutput = Pipe()
+    let pipe = Pipe(); p.standardOutput = pipe
     try? p.run(); p.waitUntilExit()
-    return p.terminationStatus == 0
+    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    return out.split(separator: "\n").compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
 }
 
 // 布局摘要："bundle@屏幕" 列表，屏幕按窗口顶边中点所在的显示器判定
@@ -108,23 +110,36 @@ func layoutSummary(_ data: Data?) -> String {
     return "\(arr.count) windows: " + items.joined(separator: " ")
 }
 
-// 重启锁：Process.waitUntilExit 会转主 runloop，1s 定时器在等待期间重入；
-// 2026-11-02 17:59 第一次重启耗时 12s，期间又触发第二次，把刚拉起的进程杀掉
+// 重启锁：Process.waitUntilExit 会转主 runloop，1s 定时器在等待期间重入。
+// 锁只覆盖"杀进程并等它退出"；防重复重启靠调用前设置的 10s 冷却。
 var restarting = false
+var launcher: Process? = nil
 
+// 按 PID 等旧进程退出，而非按进程名：DisplayLink 自带的重启助手会在旧进程退出后
+// 0.2s 内把它重新拉起，按名字轮询看不到这个空档，会一直等到上限
+// （2026-11-03 09:40 实测因此空等 9.5s，两块屏 1.5s 就绪了窗口却晚 8s 才归位）。
+// 若旧进程退出后已有新实例在跑（被助手拉起），就不再 open。
 func restartAgent() {
     guard !restarting else { return }
     restarting = true
     defer { restarting = false }
     let t0 = Date()
-    let k = Process(); k.launchPath = "/usr/bin/killall"; k.arguments = ["DisplayLinkUserAgent"]
-    try? k.run(); k.waitUntilExit()
-    // 每 100ms 查一次，进程一退就走，最多等 3 秒（实测通常 100~300ms）
-    var waited = 0.0
-    while agentAlive() && waited < 3 { Thread.sleep(forTimeInterval: 0.1); waited += 0.1 }
+    let old = agentPIDs()
+    for pid in old { kill(pid, SIGTERM) }
+    // 每 50ms 用 kill(pid, 0) 检查，最多 5 秒（实测正常清理 0.3~1.4s）
+    while old.contains(where: { kill($0, 0) == 0 }) && Date().timeIntervalSince(t0) < 5 {
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    let gone = String(format: "%.1f", Date().timeIntervalSince(t0))
+    let now = agentPIDs().filter { !old.contains($0) }
+    if !now.isEmpty {
+        say("restart: old agent exited in \(gone)s, already relaunched by DisplayLink (pid \(now[0]))")
+        return
+    }
     let o = Process(); o.launchPath = "/usr/bin/open"; o.arguments = ["-g", "-a", "DisplayLink Manager"]
-    try? o.run(); o.waitUntilExit()
-    say("restart took \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
+    try? o.run()
+    launcher = o
+    say("restart: old agent exited in \(gone)s, relaunched via open")
 }
 
 // 轮询 1s。唤醒路径：醒来后给第一块屏 3s，仍缺屏立刻重启。慢速路径（拔插等）：缺屏持续 10s 才动手。
@@ -162,8 +177,8 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
                Date() > cooldownUntil, restarts < 3, !FileManager.default.fileExists(atPath: disabledFlag) {
                 restarts += 1; bad = 0
                 say("woke with externals=\(externalCount()) < \(expected), restarting (#\(restarts))")
-                restartAgent()
                 cooldownUntil = Date().addingTimeInterval(10)
+                restartAgent()
             }
         }
     }
@@ -213,9 +228,9 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     guard bad >= 10, Date() > cooldownUntil, restarts < 3 else { return }
     restarts += 1
     say("externals=\(c) < \(expected), restarting DisplayLinkUserAgent (#\(restarts))")
-    restartAgent()
-    bad = 0
     cooldownUntil = Date().addingTimeInterval(10)
+    bad = 0
+    restartAgent()
 }
 say("started")
 RunLoop.main.run()
