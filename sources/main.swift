@@ -44,6 +44,67 @@ func dockPresent() -> Bool {
 typealias DisclaimFn = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
 let disclaim = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_spawnattrs_setdisclaim")
     .map { unsafeBitCast($0, to: DisclaimFn.self) }
+let eventLayoutEnabled = CommandLine.arguments.contains("--event-layout")
+
+// In event-layout mode this is the only LaunchAgent. Keep the AX worker as a
+// separate signed application so the wake logic never requires AX permission.
+var windowWorker: DispatchSourceProcess?
+var windowWorkerRestarts = 0
+func startWindowWorker() {
+    guard eventLayoutEnabled, windowWorker == nil else { return }
+    let dir = NSHomeDirectory() + "/Library/Scripts/dl-wake-fix/event-layout"
+    let path = dir + "/FlipGo Window Layout.app/Contents/MacOS/layout-events"
+    guard FileManager.default.isExecutableFile(atPath: path) else {
+        say("event layout: window worker missing; display recovery stays active")
+        return
+    }
+    var attr: posix_spawnattr_t?
+    var actions: posix_spawn_file_actions_t?
+    posix_spawnattr_init(&attr)
+    posix_spawn_file_actions_init(&actions)
+    defer {
+        posix_spawnattr_destroy(&attr)
+        posix_spawn_file_actions_destroy(&actions)
+    }
+    _ = disclaim?(&attr, 1)
+    let output = dir + "/layout-events.log"
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+    posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO)
+    let argv: [UnsafeMutablePointer<CChar>?] = [
+        strdup(path),
+        CommandLine.arguments.contains("--restore-full-screen") ? strdup("--restore-full-screen") : nil,
+        nil
+    ]
+    defer { argv.forEach { free($0) } }
+    var pid: pid_t = 0
+    let result = posix_spawn(&pid, path, &actions, &attr, argv, environ)
+    guard result == 0 else {
+        say("event layout: could not launch window worker (rc=\(result)); display recovery stays active")
+        return
+    }
+    let started = DispatchTime.now()
+    let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+    source.setEventHandler {
+        var status: Int32 = 0
+        _ = waitpid(pid, &status, 0)
+        windowWorker?.cancel()
+        windowWorker = nil
+        guard status != 0 else {
+            // An untrusted worker exits normally. Do not loop trying to acquire permission.
+            say("event layout: window worker exited; see layout-events.log")
+            return
+        }
+        if DispatchTime.now() >= started + 60 { windowWorkerRestarts = 0 }
+        windowWorkerRestarts += 1
+        say("event layout: window worker exited (status=\(status))")
+        if windowWorkerRestarts <= 3 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { startWindowWorker() }
+        }
+    }
+    windowWorker = source
+    source.resume()
+    say("event layout: window worker started (pid \(pid))")
+}
 
 func winlayout(_ cmd: String) {
     let path = NSHomeDirectory() + "/Library/Scripts/dl-wake-fix/dl-winlayout"
@@ -182,6 +243,7 @@ var saveAfter = Date.distantPast
 var logNextSave = false
 
 func freezeLayout() {
+    guard !eventLayoutEnabled else { return }
     restoreJobs.forEach { $0.cancel() }
     restoreJobs.removeAll()
     guard !needRestore else { return }
@@ -194,6 +256,7 @@ func freezeLayout() {
 }
 
 func restoreLayoutIfReady() {
+    guard !eventLayoutEnabled else { return }
     guard needRestore, !screenLocked() else { return }
     needRestore = false
     guard let layout = frozen else { return }
@@ -384,7 +447,7 @@ if watchFD >= 0 {
 
 // 已授权的 dl-winlayout 仍负责记录窗口，定时器只用于布局快照。
 func recordLayoutIfReady() {
-    guard !displaySleeping, !restarting, !needRestore, !screenLocked(),
+    guard !eventLayoutEnabled, !displaySleeping, !restarting, !needRestore, !screenLocked(),
           Date() > saveAfter, DisplayState().healthy else { return }
     saveLayout()
     if logNextSave {
@@ -392,10 +455,16 @@ func recordLayoutIfReady() {
         say("layout after restore: \(layoutSummary(FileManager.default.contents(atPath: layoutPath)))")
     }
 }
-let layoutTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in recordLayoutIfReady() }
+let layoutTimer = eventLayoutEnabled ? nil : Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in
+    recordLayoutIfReady()
+}
 DispatchQueue.main.async {
     say("started (display events)")
     updateDisplays()
-    recordLayoutIfReady()
+    if eventLayoutEnabled {
+        startWindowWorker()
+    } else {
+        recordLayoutIfReady()
+    }
 }
 app.run()
