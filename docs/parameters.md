@@ -88,3 +88,24 @@ Apple M4、macOS 26.3、DisplayLink Manager 17.1.56、FlipGo USB `17e9:6000`。
 ```
 
 没有插拔 USB 或重开面板电源。另一次较短的熄屏测试中，两块屏自行恢复，驱动 PID 未改变。
+
+## 用户 Mac 自然熄屏验证（2026-11-28）
+
+Apple M4、macOS 26.3、DisplayLink Manager 17.1.56、FlipGo USB `17e9:6000`；
+系统显示器熄屏计时设置为 3 分钟。自然熄屏后等待约 13 分半，再手动唤醒并解锁。
+
+```text
+2026-11-27 23:46:45  asleep=true dock=true panels=FlipGo-D1,FlipGo-D2
+2026-11-28 00:00:16  received NSWorkspaceScreensDidWakeNotification
+2026-11-28 00:00:19  asleep=false dock=true panels=FlipGo-D2 locked=true
+2026-11-28 00:00:22  missing FlipGo-D1, restarting (#1)
+2026-11-28 00:00:23  restart: old agent exited in 0.9s, relaunched via open
+2026-11-28 00:00:26  asleep=false dock=true panels=FlipGo-D1,FlipGo-D2 locked=false
+```
+
+从亮屏通知到两块屏均恢复约 10 秒，无需拔线或操作面板电源。唤醒后检查的两个全屏窗口各自在原来的屏上。
+窗口助手匹配了 12 个普通窗口，但没有移动任何一个窗口；全屏桌面位置的保留并非窗口助手还原的结果。
+
+同一台 Mac 另测了拔下 FlipGo、临时接入另一台显示器、再接回 FlipGo 的流程：
+23:38:14 识别到 USB 设备，23:38:18 两块屏齐全，后台服务未重启 DisplayLink。
+拔线前的普通窗口都在内建屏，因此这轮只确认窗口助手在重连后运行，并未验证普通窗口跨屏归位。
