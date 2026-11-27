@@ -63,16 +63,16 @@ FlipGo 的行为让这个 bug 更容易命中：两块面板进入低功耗的�
 
 ## The fix / 解决
 
-A launchd daemon polling once per second, restarting the DisplayLink agent when the screens are awake, the dock is present, and fewer than two external displays exist.
+A background AppKit application runs in the user's launchd Aqua session. It listens for screen sleep, wake, display configuration, and FlipGo USB changes. When the USB device is still connected and a panel remains missing, it restarts the DisplayLink agent.
 
-一个 launchd 守护进程，每秒轮询一次；当屏幕醒着、扩展坞在线、外接屏少于 2 块时重启 DisplayLink 进程。
+后台 AppKit 应用由 launchd 在当前用户的 Aqua 会话中启动。它监听熄屏、亮屏、显示配置和 FlipGo USB 变化。当 USB 设备仍在线而有面板迟迟未出现时，它会重启 DisplayLink 进程。
 
-1. **Wake path (fast).** When `CGDisplayIsAsleep` flips to false, wait 3 s for the first panel. If the second is still missing, `killall DisplayLinkUserAgent` + `open -g -a "DisplayLink Manager"` forces a full rebuild. Measured **6 s from wake to both screens up**.
-   **唤醒路径（快）**：`CGDisplayIsAsleep` 由 true 变 false 后等 3 秒，若第二块屏仍未出现，执行 `killall DisplayLinkUserAgent` + `open -g -a "DisplayLink Manager"` 强制全量重建。实测**亮屏到两屏齐 6 秒**。
-2. **Slow path.** Scenarios without a sleep transition (replugging) use a 10 s window, so it doesn't fight panels appearing one after another.
-   **慢速路径**：不经过熄屏的场景（拔插数据线）用 10 秒窗口兜底，避免和陆续出现的屏幕互相打架。
-3. **Window layout restore.** Because DisplayLink destroys both virtual displays, macOS evicts every window that was on them. A helper records window positions while healthy and puts them back once both displays are up and the session is unlocked. The layout is frozen the moment a display goes missing, and restore runs at 2, 5, 10, 20 and 30 s after recovery: Electron apps (Codex, Paseo) can take several seconds to re-register their windows, and a single early pass would miss them — after which the wrong position would be recorded as the new baseline.
-   **窗口还原**：因为 DisplayLink 销毁了两块虚拟屏，macOS 会把上面的窗口全部挪走。独立帮手在系统正常时记录窗口位置，两块屏就位且解锁后摆回原位。布局在缺屏那一刻就冻结，恢复后在第 2、5、10、20、30 秒各还原一次：Electron 应用（Codex、Paseo）的窗口可能要好几秒才重新出现在窗口列表里，只还原一次会漏掉它们，之后错误位置还会被记成新的基准。
+1. **Wake path.** When FlipGo was connected before sleep, wait 3 s for active display names `FlipGo-D1` and `FlipGo-D2` to settle, up to 10 s after wake. If neither panel has appeared at the check, allow the longer initialization window before restarting.
+   **亮屏路径**：如果熄屏前就已接好 FlipGo，等活动显示器中的 `FlipGo-D1`、`FlipGo-D2` 枚举稳定 3 秒，这轮等待最长到亮屏后 10 秒。如果检查时两块都未出现，再给驱动一个较长的初始化窗口。
+2. **Reconnect path.** Allow 10 s after a USB connection or a missing-panel event outside the wake path. Cancel a pending restart once both panels appear or the dock is removed.
+   **重连路径**：USB 新接入或非亮屏场景下缺屏时等 10 秒。两块都出现或 USB 已断开时，取消待执行的重启。
+3. **Window layout restore.** Because DisplayLink destroys both virtual displays, macOS evicts every window that was on them. A helper records window positions every 15 s while healthy and puts them back once both displays are up and the session is unlocked. The layout is frozen the moment a display goes missing, and restore runs at 2, 5, 10, 20 and 30 s after recovery: Electron apps (Codex, Paseo) can take several seconds to re-register their windows, and a single early pass would miss them — after which the wrong position would be recorded as the new baseline.
+   **窗口还原**：因为 DisplayLink 销毁了两块虚拟屏，macOS 会把上面的窗口全部挪走。独立帮手在系统正常时每 15 秒记录窗口位置，两块屏就位且解锁后摆回原位。布局在缺屏那一刻就冻结，恢复后在第 2、5、10、20、30 秒各还原一次：Electron 应用（Codex、Paseo）的窗口可能要好几秒才重新出现在窗口列表里，只还原一次会漏掉它们，之后错误位置还会被记成新的基准。
 
 Restarting the agent is required — merely activating the already-running DisplayLink Manager does not recreate the missing display (tested: 16 s, no recovery).
 
@@ -85,7 +85,7 @@ Restarting the agent is required — merely activating the already-running Displ
 | `sources/main.swift` | daemon / 守护进程 |
 | `sources/winlayout.swift` | window layout record & restore / 窗口记录与还原 |
 | `bin/` | prebuilt binaries + SHA256SUMS |
-| `launchd/` | LaunchAgent definition / 启动项配置 |
+| `launchd/` | LaunchAgent and background app metadata / 启动项与后台应用配置 |
 | `install.sh` | deploy to `~/Library/Scripts/dl-wake-fix/` / 部署脚本 |
 | `docs/evidence.md` | raw log excerpts and reproduction commands / 日志证据与复现命令 |
 | `docs/parameters.md` | every timing value with its measured justification / 参数取值依据 |
@@ -123,6 +123,13 @@ Pause / 暂停：`touch ~/Library/Scripts/dl-wake-fix/disabled`
 Accessibility permission is bound to the binary's cdhash. **Recompiling `sources/winlayout.swift` invalidates the granted permission** and requires re-adding the binary in System Settings. Prefer changing `sources/main.swift`, which needs no permissions.
 
 辅助功能授权绑定二进制的 cdhash。**重新编译 `sources/winlayout.swift` 会让已授予的权限失效**，必须在系统设置里重新添加。优先修改 `sources/main.swift`，它不需要任何权限。
+
+To rebuild only the background app executable before running `./install.sh`:
+
+```sh
+xcrun swiftc -O sources/main.swift -o bin/dl-wake-fix
+(cd bin && shasum -a 256 dl-wake-fix dl-winlayout > SHA256SUMS)
+```
 
 ## Status / 状态
 
