@@ -4,20 +4,20 @@
 
 | 参数 | 当前值 | 说明 |
 |---|---|---|
-| 轮询间隔 | 1 秒 | 查 USB 设备列表 + 显示器数量，合计 0.034 ms/次（实测），CPU 占用约 0.003% |
-| 唤醒路径等待 | 3 秒 | 屏幕刚醒时给第一块屏出现的时间，之后仍缺屏就立刻重启 |
-| 慢速路径判定 | 连续 10 次（10 秒） | 不经过熄屏的场景（拔插数据线等）用时间窗兜底，避免和陆续出现的屏幕打架 |
-| 重启后冷却 | 10 秒 | 重建两块屏实测约 2 秒。原来设 30 秒，会拦住"假恢复"（刚恢复又掉）后的重试 |
-| 恢复后 | 立刻清零冷却与计数 | 让"刚恢复又掉"能马上重试；总量由「最多连续重启 3 次」兜住，不会死循环 |
-| 最多连续重启 | 3 次 | 兜底上限，防止"建-掉-建-掉"死循环 |
-| 无面板时的判定来源 | `CGGetOnlineDisplayList` | 熄屏时 `CGGetActiveDisplayList` 返回空，只能用 online 判断设备是否还在 |
+| 救屏触发 | 亮屏、显示配置和 USB 事件 | AppKit 后台应用在 Aqua 会话接收通知；事件后才安排检查 |
+| 唤醒路径等待 | 3 秒，面板集合变化可延后至亮屏后 10 秒 | 给先后回来的两块屏留出时间；检查时两块都未出现，则再等一个 10 秒的初始化窗口 |
+| 重连路径等待 | 10 秒 | 给新接入的 FlipGo 枚举时间，双屏齐全或 USB 断开时取消 |
+| 重启后冷却 | 10 秒 | 重启后仍缺屏时，安排一次延后检查 |
+| 重试计数重置 | 双屏持续正常 10 秒、熄屏或换接 USB | 短暂的假恢复不足以重置重试计数 |
+| 每轮最多重启 | 3 次 | 给长熄屏后的假恢复留出重试机会 |
+| 面板识别 | 活动显示器名 + USB `17e9:6000` 在线状态 | 按 `FlipGo-D1`、`FlipGo-D2` 判断 |
 | kill 到 open | 按 PID 每 50ms 检查旧进程退出，上限 5 秒 | 实测 0.4～1.4 秒退出；旧进程退出后若已被 DisplayLink 自带助手拉起，就不再 open |
 | 布局冻结 | 缺屏那一刻 | 还原以冻结的这份为准，还原期间每轮都先写回，防止被错误位置覆盖 |
 | 窗口还原时机 | 恢复后第 2、5、10、20、30 秒 | 每轮幂等（已就位的窗口不重复移动）；后几轮兜住晚出现的 Electron 窗口 |
 | 还原后暂停记录 | 35 秒 | 晚于最后一轮还原，避免把还原过程中的中间位置存成新基准 |
 | 正常时记录间隔 | 15 秒 | 代价：熄屏前最后 15 秒内挪过的窗口会被还原到挪之前的位置 |
 
-## 实测耗时演进
+## 原轮询版本的实测耗时
 
 | 版本 | 亮屏到两屏齐 |
 |---|---|
@@ -37,7 +37,7 @@
 | 几分钟 ~ 12.9 小时 | 33 | 0 |
 | 38.8 小时（周末） | 1 | 1 |
 
-长时间断电后，FlipGo 的 D2 面板彻底放电、主控唤醒更慢，DisplayLink 会先按 1280×800 兜底模式建出来、拿不到正确 EDID 再销毁重来（日志 09:21:23.768 `CDVirtualDisplayDestroy`）。这一抖导致刚恢复就又掉，而当时的 30 秒冷却把重试拦住了 28 秒，体感就是"开机卡了 40 秒"。上面的冷却改动是针对这个场景的。
+长时间断电后，FlipGo 的 D2 面板彻底放电、主控唤醒更慢，DisplayLink 会先按 1280×800 兜底模式建出来、拿不到正确 EDID 再销毁重来（日志 09:21:23.768 `CDVirtualDisplayDestroy`）。这一抖导致刚恢复就又掉，而当时的 30 秒冷却把重试拦住了 28 秒，体感就是"开机卡了 40 秒"。事件版本同样保留重试窗口，并要求双屏稳定一段时间后再重置计数。
 
 注意：长熄屏样本只有 2 个，这个规律是机制推断而非统计结论。
 
@@ -67,7 +67,24 @@
 
 ## 关键实现细节
 
-- **不能用 `NSWorkspace.screensDidWakeNotification`**：launchd 拉起的命令行进程收不到该通知，实测完全不触发，所以改为轮询。
-- **USB 匹配不能只给 `idVendor`**：IOKit 的 USB 匹配字典要求同时提供 `idProduct`，只给 vendor 会匹配不到任何设备。改为遍历 `IOUSBHostDevice` 后自行比对 `idVendor == 0x17e9`。
+- **使用 AppKit 事件循环接收通知**：launchd 启动的命令行探针在 2026-10-09 和 2026-11-27 的实测中没有收到亮屏通知。2026-11-27 的 Aqua 会话实测中，用应用包启动并运行 `NSApplication.run()` 后收到了亮屏通知和显示配置变化。
+- **USB 匹配不能只给 `idVendor`**：IOKit 的 USB 匹配字典要求同时提供 `idProduct`，只给 vendor 会匹配不到任何设备。匹配 `IOUSBHostDevice` 时同时指定 FlipGo 的 `idVendor == 0x17e9` 与 `idProduct == 0x6000`。
 - **`dl-winlayout` 必须用 disclaim 方式 spawn**：否则 TCC 按父进程（`dl-wake-fix`）判定权限，子进程返回 `NOT_TRUSTED`。实现见 `sources/main.swift` 里的 `responsibility_spawnattrs_setdisclaim`。
 - **熄屏必然锁屏**：锁屏时辅助功能 API 读到 0 个窗口。因此锁屏期间不记录布局，读到空列表时回退到上一份记录，还原则等解锁后再执行。
+
+## 事件版本实机验证（2026-11-27）
+
+Apple M4、macOS 26.3、DisplayLink Manager 17.1.56、FlipGo USB `17e9:6000`。
+从临时 Aqua LaunchAgent 启动应用包，用 `pmset displaysleepnow` 熄屏约 24 秒，再用
+`caffeinate -u -d -t 4` 唤醒。测试未安装窗口辅助程序，不包含窗口还原验证。
+
+```text
+22:32:29  asleep=true dock=true panels=
+22:32:53  received NSWorkspaceScreensDidWakeNotification
+22:32:56  asleep=false dock=true panels=FlipGo-D2
+22:33:00  missing FlipGo-D1, restarting (#1)
+22:33:00  restart: old agent exited in 0.6s, relaunched via open
+22:33:02  asleep=false dock=true panels=FlipGo-D1,FlipGo-D2
+```
+
+没有插拔 USB 或重开面板电源。另一次较短的熄屏测试中，两块屏自行恢复，驱动 PID 未改变。
