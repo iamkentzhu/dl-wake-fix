@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.kent.dl-wake-fix.layout-events</string>
+  <key>CFBundleName</key>
+  <string>FlipGo Window Layout</string>
+  <key>CFBundleDisplayName</key>
+  <string>FlipGo Window Layout</string>
+  <key>CFBundleExecutable</key>
+  <string>layout-events</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
